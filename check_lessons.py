@@ -18,6 +18,7 @@ from bs4 import BeautifulSoup
 
 BOOKING_URL = "https://moragavalleyswimtennisclub.theclubspot.com/reserve/LtrQVDM3b8"
 TEACHER_NAME = "Sadie"
+NOTIFIED_FLAG = ".notified"
 
 
 def fetch_page():
@@ -48,7 +49,6 @@ def parse_availability(html):
     soup = BeautifulSoup(html, "html.parser")
     page_text = soup.get_text(separator="\n")
 
-    available_dates = []
     date_match = re.search(r"DATE\s*\n\s*(\w+ \d+)", page_text)
     current_date = date_match.group(1).strip() if date_match else "Unknown date"
 
@@ -141,7 +141,20 @@ Book now before they fill up:
     print(f"Email sent to {recipient}!")
 
 
+def mark_notified():
+    """Create a flag file so the workflow knows we already notified this week."""
+    with open(NOTIFIED_FLAG, "w") as f:
+        f.write(f"Notified at {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}\n")
+    print(f"Created {NOTIFIED_FLAG} flag - will pause until next Saturday.")
+
+
 def main():
+    # Check if we already notified this week (cache hit from GitHub Actions)
+    already_notified = os.environ.get("ALREADY_NOTIFIED", "").lower() == "true"
+    if already_notified:
+        print("Already notified this week. Skipping until next Saturday.")
+        sys.exit(0)
+
     print(f"Checking {BOOKING_URL} ...")
     try:
         html = fetch_page()
@@ -165,6 +178,7 @@ def main():
         for slot in available_slots:
             print(f"  - {slot['date']} at {slot['time']}")
         send_email(available_slots, current_date)
+        mark_notified()
     else:
         print(f"No available slots with {TEACHER_NAME} yet. All full or not posted.")
 
