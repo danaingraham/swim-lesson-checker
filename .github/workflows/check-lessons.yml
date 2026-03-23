@@ -2,8 +2,7 @@ name: Check Swim Lessons
 
 on:
   schedule:
-    - cron: "*/30 * * * 6"
-    - cron: "*/30 * * * 0"
+    - cron: "*/30 * * * *"  # Every 30 min, every day
   workflow_dispatch:
 
 jobs:
@@ -12,15 +11,44 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Calculate swim week key (Sat-Fri)
+        id: week
+        run: |
+          WEEK_KEY=$(python3 -c "
+          from datetime import datetime, timedelta
+          today = datetime.utcnow()
+          days_since_sat = (today.weekday() + 2) % 7
+          sat = today - timedelta(days=days_since_sat)
+          print(sat.strftime('%Y-%m-%d'))")
+          echo "key=swim-week-$WEEK_KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Check if already notified this week
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .notified
+          key: ${{ steps.week.outputs.key }}
+
       - name: Check for Sadie's availability
         env:
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+          ALREADY_NOTIFIED: ${{ steps.cache.outputs.cache-hit }}
         run: python check_lessons.py
+
+      - name: Mark as notified for this week
+        if: hashFiles('.notified') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .notified
+          key: ${{ steps.week.outputs.key }}
