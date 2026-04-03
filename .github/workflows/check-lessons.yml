@@ -1,13 +1,17 @@
 name: Check Swim Lessons
 
 on:
+  # Runs every 30 minutes, every day (Sat-Fri cycle)
   schedule:
-    - cron: "*/30 * * * *"  # Every 30 min, every day
+    - cron: "*/30 * * * *"
+
+  # Allow manual trigger from GitHub UI
   workflow_dispatch:
 
 jobs:
   check:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -18,18 +22,22 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium --with-deps
 
       - name: Calculate swim week key (Sat-Fri)
         id: week
         run: |
           WEEK_KEY=$(python3 -c "
-          from datetime import datetime, timedelta
-          today = datetime.utcnow()
+          from datetime import timedelta
+          from datetime import datetime
+          today = datetime.utcnow().date()
           days_since_sat = (today.weekday() + 2) % 7
           sat = today - timedelta(days=days_since_sat)
-          print(sat.strftime('%Y-%m-%d'))")
-          echo "key=swim-week-$WEEK_KEY" >> "$GITHUB_OUTPUT"
+          print(f'swim-week-{sat.isoformat()}')
+          ")
+          echo "key=$WEEK_KEY" >> "$GITHUB_OUTPUT"
 
       - name: Check if already notified this week
         id: cache
