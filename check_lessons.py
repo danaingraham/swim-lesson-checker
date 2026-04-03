@@ -33,46 +33,135 @@ TEACHER_NAME = "Sadie"
 TIME_PATTERN = re.compile(r"\d{1,2}:\d{2}\s*(?:AM|PM)")
 
 
-def fetch_rendered_page(page):
+def fetch_availability_from_api(page):
     """
-    Load the booking page and wait for the booking data API to finish.
-    Uses expect_response() BEFORE navigation so we catch the API
-    response even though it arrives during page load.
-    Returns the fully rendered HTML.
+    Load the booking page and intercept the API responses to determine
+    availability directly from the JSON data, bypassing DOM rendering
+    issues (the page shows all slots as 'booked' for anonymous users).
+
+    Returns a list of available slot dicts.
     """
-    # Set up response listener BEFORE navigating so we don't miss it
-    with page.expect_response(
-        lambda resp: "retrieve_bookings_for_calendar" in resp.url,
-        timeout=60000
-    ) as response_info:
-        page.goto(BOOKING_URL, timeout=60000)
+    import json
 
-    print(f"  Bookings API responded with status: {response_info.value.status}")
+    events_data = None
+    bookings_data = None
 
-    # Wait for availability buttons to appear in the DOM
-    try:
-        page.wait_for_selector("div.availabilityButtonV2", timeout=20000)
-    except Exception:
-        print("  Timed out waiting for availability buttons to render.")
-        return page.content()
+    def capture_events(response):
+        nonlocal events_data
+        if "retrieve_events_for_time_blocks_calendar" in response.url:
+            try:
+                events_data = response.json()
+            except Exception:
+                pass
 
-    # CRITICAL: Vue.js initially renders ALL buttons with "booked" class,
-    # then removes it from available slots after processing the bookings API
-    # response. We must wait for this DOM update to complete.
-    # Wait for at least one non-booked button (= available slot) to appear.
-    # If all slots are genuinely booked, this will timeout (which is fine).
-    try:
-        page.wait_for_selector(
-            "div.availabilityButtonV2:not(.booked)", timeout=15000
-        )
-        print("  DOM updated: found available (non-booked) slots.")
-    except Exception:
-        print("  No non-booked buttons found after 15s (all slots may be booked).")
+    def capture_bookings(response):
+        nonlocal bookings_data
+        if "retrieve_bookings_for_calendar" in response.url:
+            try:
+                bookings_data = response.json()
+            except Exception:
+                pass
 
-    # Small extra buffer for any remaining Vue reactivity
-    page.wait_for_timeout(1000)
+    page.on("response", capture_events)
+    page.on("response", capture_bookings)
 
-    return page.content()
+    page.goto(BOOKING_URL, wait_until="networkidle", timeout=60000)
+
+    # Give a moment for callbacks to fire
+    page.wait_for_timeout(2000)
+
+    print(f"  Events API captured: {events_data is not None}")
+    print(f"  Bookings API captured: {bookings_data is not None}")
+
+    if events_data is None or bookings_data is None:
+        print("  ERROR: Could not capture API responses.")
+        return [], "Unknown date"
+
+    # Extract all time slots from events data
+    all_slots = []
+    events = events_data if isinstance(events_data, list) else events_data.get("data", events_data.get("events", []))
+
+    # Debug: show structure
+    if isinstance(events_data, dict):
+        print(f"  Events response keys: {list(events_data.keys())}")
+    print(f"  Events count: {len(events) if isinstance(events, list) else 'not a list'}")
+
+    # Extract booked slot IDs from bookings data
+    bookings = bookings_data if isinstance(bookings_data, list) else bookings_data.get("data", bookings_data.get("bookings", []))
+    if isinstance(bookings_data, dict):
+        print(f"  Bookings response keys: {list(bookings_data.keys())}")
+    print(f"  Bookings count: {len(bookings) if isinstance(bookings, list) else 'not a list'}")
+
+    # Build set of booked event IDs/times
+    booked_keys = set()
+    if isinstance(bookings, list):
+        for b in bookings:
+            if isinstance(b, dict):
+                # Try common key patterns
+                key = b.get("event_id") or b.get("eventId") or b.get("id") or ""
+                area = b.get("area_id") or b.get("areaId") or ""
+                start = b.get("start_time") or b.get("startTime") or b.get("start") or ""
+                booked_keys.add(f"{area}_{start}")
+                if key:
+                    booked_keys.add(str(key))
+
+    # Find Sadie's available slots
+    available = []
+    sadie_total = 0
+
+    if isinstance(events, list):
+        for evt in events:
+            if not isinstance(evt, dict):
+                continue
+            # Look for Sadie in area/instructor name
+            area_name = str(evt.get("area_name", "") or evt.get("areaName", "") or evt.get("name", ""))
+            instructor = str(evt.get("instructor", "") or evt.get("instructor_name", ""))
+            combined = f"{area_name} {instructor}".lower()
+
+            if TEACHER_NAME.lower() not in combined:
+                continue
+
+            sadie_total += 1
+            area_id = evt.get("area_id") or evt.get("areaId") or ""
+            start_time = evt.get("start_time") or evt.get("startTime") or evt.get("start") or ""
+            evt_id = str(evt.get("id", ""))
+
+            is_booked = (
+                f"{area_id}_{start_time}" in booked_keys
+                or evt_id in booked_keys
+            )
+
+            if not is_booked:
+                # Format time for display
+                slot_time = "Unknown time"
+                try:
+                    st = int(start_time) if start_time else 0
+                    hours = st // 100
+                    mins = st % 100
+                    ampm = "AM" if hours < 12 else "PM"
+                    display_hr = hours if hours <= 12 else hours - 12
+                    if display_hr == 0:
+                        display_hr = 12
+                    slot_time = f"{display_hr}:{mins:02d} {ampm}"
+                except (ValueError, TypeError):
+                    slot_time = str(start_time)
+
+                available.append({
+                    "time": slot_time,
+                    "date": str(evt.get("date", "Unknown date")),
+                })
+
+    print(f"  Sadie: {sadie_total} slots total, {len(available)} available.")
+
+    # Also dump a sample event and booking for debugging
+    if isinstance(events, list) and events:
+        sample = {k: v for k, v in (events[0] if isinstance(events[0], dict) else {}).items()}
+        print(f"  Sample event keys: {list(sample.keys())[:15]}")
+    if isinstance(bookings, list) and bookings:
+        sample_b = {k: v for k, v in (bookings[0] if isinstance(bookings[0], dict) else {}).items()}
+        print(f"  Sample booking keys: {list(sample_b.keys())[:15]}")
+
+    return available, "today"
 
 
 def parse_availability(html):
@@ -196,9 +285,8 @@ def main():
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
 
-            print("Loading page and waiting for bookings API...")
-            html = fetch_rendered_page(page)
-            slots, date_label = parse_availability(html)
+            print("Loading page and intercepting API responses...")
+            slots, date_label = fetch_availability_from_api(page)
             all_available.extend(slots)
 
             browser.close()
