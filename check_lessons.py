@@ -59,15 +59,35 @@ def check_availability_via_api(page):
     return time_blocks, bookings
 
 
+def _extract_id(val):
+    """Extract an objectId from a value that could be a dict, pointer, or string."""
+    if isinstance(val, dict):
+        return val.get("objectId", "")
+    elif isinstance(val, str):
+        return val
+    return ""
+
+
 def find_available_from_api(time_blocks, bookings):
     """Compare time blocks vs bookings to find Sadie's open slots."""
+    # Debug: log first booking structure
+    if bookings:
+        print(f"  [API] Sample booking keys: {list(bookings[0].keys()) if isinstance(bookings[0], dict) else type(bookings[0])}")
+        if isinstance(bookings[0], dict):
+            sample = {k: type(v).__name__ for k, v in bookings[0].items()}
+            print(f"  [API] Sample booking types: {sample}")
+
+    # Debug: log first time block structure
+    if time_blocks:
+        print(f"  [API] Sample block keys: {list(time_blocks[0].keys()) if isinstance(time_blocks[0], dict) else type(time_blocks[0])}")
+
     # Build a set of booked (event_id, area_id) pairs
     booked_keys = set()
     for b in bookings:
-        ev = b.get("event", {})
-        ar = b.get("area", {})
-        ev_id = ev.get("objectId", "") if isinstance(ev, dict) else ""
-        ar_id = ar.get("objectId", "") if isinstance(ar, dict) else ""
+        if isinstance(b, str):
+            continue  # skip if booking is just a string ID
+        ev_id = _extract_id(b.get("event", ""))
+        ar_id = _extract_id(b.get("area", ""))
         if ev_id and ar_id:
             booked_keys.add((ev_id, ar_id))
     print(f"  [API] {len(booked_keys)} booked (event, area) pairs.")
@@ -76,6 +96,8 @@ def find_available_from_api(time_blocks, bookings):
     available = []
     sadie_total = 0
     for block in time_blocks:
+        if isinstance(block, str):
+            continue  # skip if block is just a string ID
         block_id = block.get("objectId", "")
         areas = block.get("areas", [])
         start_time = block.get("startTime", 0)
@@ -88,6 +110,8 @@ def find_available_from_api(time_blocks, bookings):
             date_str = str(date_obj)
 
         for area in areas:
+            if isinstance(area, str):
+                continue
             area_name = area.get("name", "")
             if TEACHER_NAME.lower() not in area_name.lower():
                 continue
@@ -236,22 +260,30 @@ def main():
             # Method 1: Intercept API responses
             time_blocks, bookings = check_availability_via_api(page)
 
-            slots = []
+            # Method 1: Try API interception
+            api_slots = []
             if time_blocks:
                 print(f"\n  Using API method ({len(time_blocks)} blocks, {len(bookings)} bookings).")
-                slots = find_available_from_api(time_blocks, bookings)
+                try:
+                    api_slots = find_available_from_api(time_blocks, bookings)
+                except Exception as e:
+                    print(f"  [API] Error parsing API data: {e}")
             else:
-                print(f"\n  API interception captured nothing. Falling back to DOM analysis.")
+                print(f"\n  API interception captured nothing.")
 
-            # Method 2: DOM text analysis (always run as verification or fallback)
+            # Method 2: DOM text analysis (always run)
+            print(f"\n  Running DOM text analysis...")
             dom_slots = check_availability_via_dom(page)
-            if not slots and dom_slots:
-                print(f"  Using DOM method results.")
+
+            # Use whichever found more results
+            if api_slots and len(api_slots) >= len(dom_slots):
+                print(f"  Using API results ({len(api_slots)} slots).")
+                slots = api_slots
+            elif dom_slots:
+                print(f"  Using DOM results ({len(dom_slots)} slots).")
                 slots = dom_slots
-            elif slots and dom_slots:
-                print(f"  API found {len(slots)}, DOM found {len(dom_slots)}. Using max.")
-                if len(dom_slots) > len(slots):
-                    slots = dom_slots
+            else:
+                slots = api_slots  # might be empty
 
             browser.close()
     except Exception as e:
