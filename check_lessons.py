@@ -12,15 +12,14 @@ The page loads availability in two API calls:
 We must wait for BOTH to complete before reading the DOM, otherwise all
 buttons appear as "booked" before the real data arrives.
 
-We also check multiple dates since the default date may be fully booked
-while other dates within the 1-7 day booking window have openings.
+We use page.expect_response() BEFORE navigation so the listener is
+active when the API responses arrive during page load.
 """
 
 import os
 import re
 import sys
 import smtplib
-import time as _time
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
@@ -34,96 +33,33 @@ TEACHER_NAME = "Sadie"
 TIME_PATTERN = re.compile(r"\d{1,2}:\d{2}\s*(?:AM|PM)")
 
 
-def get_bookable_dates():
-    """
-    Return the list of bookable dates based on the booking rules:
-    - At least 1 day in advance, no more than 7
-    - Only Monday-Friday
-    """
-    today = datetime.now().date()
-    dates = []
-    for offset in range(1, 8):
-        d = today + timedelta(days=offset)
-        if d.weekday() < 5:  # Mon=0 ... Fri=4
-            dates.append(d)
-    return dates
-
-
-def fetch_rendered_page(page, date_str=None):
+def fetch_rendered_page(page):
     """
     Load the booking page and wait for the booking data API to finish.
-    If date_str is provided, click the date picker and select that date.
+    Uses expect_response() BEFORE navigation so we catch the API
+    response even though it arrives during page load.
     Returns the fully rendered HTML.
     """
-    if date_str is None:
-        # Fresh page load
-        page.goto(BOOKING_URL, wait_until="networkidle", timeout=60000)
+    # Set up response listener BEFORE navigating so we don't miss it
+    with page.expect_response(
+        lambda resp: "retrieve_bookings_for_calendar" in resp.url,
+        timeout=60000
+    ) as response_info:
+        page.goto(BOOKING_URL, timeout=60000)
 
-    # Wait for availability buttons to appear
+    print(f"  Bookings API responded with status: {response_info.value.status}")
+
+    # Wait for availability buttons to appear in the DOM
     try:
         page.wait_for_selector("div.availabilityButtonV2", timeout=20000)
     except Exception:
         print("  Timed out waiting for availability buttons to render.")
         return page.content()
 
-    # CRITICAL: Wait for the bookings API response which determines
-    # which slots are booked vs available. Without this, all buttons
-    # initially appear as "booked" before the real data loads.
-    try:
-        page.wait_for_response(
-            lambda resp: "retrieve_bookings_for_calendar" in resp.url,
-            timeout=15000
-        )
-    except Exception:
-        print("  Timed out waiting for bookings API response.")
-
     # Give Vue.js a moment to update the DOM after the API response
-    page.wait_for_timeout(2000)
+    page.wait_for_timeout(3000)
 
     return page.content()
-
-
-def click_date(page, target_date):
-    """
-    Click the date picker and select a specific date.
-    The date picker input shows e.g. "April 3".
-    """
-    month_name = target_date.strftime("%B")  # e.g. "April"
-    day_num = target_date.day  # e.g. 3
-    target_label = f"{month_name} {day_num}"
-
-    # Click the date input to open the picker
-    date_input = page.query_selector('input.pointer')
-    if not date_input:
-        print(f"  Could not find date picker input.")
-        return False
-
-    date_input.click()
-    page.wait_for_timeout(500)
-
-    # Look for the target date in the date picker popup
-    # The picker shows calendar days - try clicking the day number
-    try:
-        # Try to find and click the date in a calendar popup
-        day_cell = page.locator(f'text="{day_num}"').first
-        if day_cell:
-            day_cell.click()
-            page.wait_for_timeout(1000)
-
-            # Wait for new data to load
-            try:
-                page.wait_for_response(
-                    lambda resp: "retrieve_bookings_for_calendar" in resp.url,
-                    timeout=15000
-                )
-            except Exception:
-                pass
-            page.wait_for_timeout(2000)
-            return True
-    except Exception as e:
-        print(f"  Could not select date {target_label}: {e}")
-
-    return False
 
 
 def parse_availability(html):
@@ -134,13 +70,13 @@ def parse_availability(html):
     have the 'booked' CSS class. Booked/unavailable (gray) slots have 'booked'.
     """
     soup = BeautifulSoup(html, "html.parser")
-    page_text = soup.get_text(separator="\n")
 
     # Extract current date from the date input field
     date_input = soup.find("input", class_="pointer")
     if date_input and date_input.get("value"):
         current_date = date_input["value"]
     else:
+        page_text = soup.get_text(separator="\n")
         date_match = re.search(r"DATE\s*\n\s*(\w+ \d+)", page_text)
         current_date = date_match.group(1).strip() if date_match else "Unknown date"
 
@@ -247,29 +183,10 @@ def main():
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
 
-            # Load the default page first
-            print("Loading default date...")
+            print("Loading page and waiting for bookings API...")
             html = fetch_rendered_page(page)
             slots, date_label = parse_availability(html)
             all_available.extend(slots)
-
-            # Now try other bookable dates
-            bookable_dates = get_bookable_dates()
-            print(f"Will also check dates: {[d.strftime('%B %d') for d in bookable_dates]}")
-
-            for target_date in bookable_dates:
-                date_label_check = target_date.strftime("%B %-d")
-                # Skip if we already checked this date (the default)
-                if date_label_check in [s["date"] for s in all_available] or date_label == date_label_check:
-                    if date_label == date_label_check:
-                        print(f"  Skipping {date_label_check} (already checked as default).")
-                        continue
-
-                print(f"Checking {date_label_check}...")
-                if click_date(page, target_date):
-                    html = page.content()
-                    slots, _ = parse_availability(html)
-                    all_available.extend(slots)
 
             browser.close()
 
@@ -289,7 +206,7 @@ def main():
             print(f"Error sending email: {e}")
             sys.exit(1)
     else:
-        print(f"\nNo available slots with {TEACHER_NAME} on any date. All full or not posted.")
+        print(f"\nNo available slots with {TEACHER_NAME}. All full or not posted yet.")
 
 
 if __name__ == "__main__":
