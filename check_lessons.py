@@ -56,8 +56,21 @@ def fetch_rendered_page(page):
         print("  Timed out waiting for availability buttons to render.")
         return page.content()
 
-    # Give Vue.js a moment to update the DOM after the API response
-    page.wait_for_timeout(3000)
+    # CRITICAL: Vue.js initially renders ALL buttons with "booked" class,
+    # then removes it from available slots after processing the bookings API
+    # response. We must wait for this DOM update to complete.
+    # Wait for at least one non-booked button (= available slot) to appear.
+    # If all slots are genuinely booked, this will timeout (which is fine).
+    try:
+        page.wait_for_selector(
+            "div.availabilityButtonV2:not(.booked)", timeout=15000
+        )
+        print("  DOM updated: found available (non-booked) slots.")
+    except Exception:
+        print("  No non-booked buttons found after 15s (all slots may be booked).")
+
+    # Small extra buffer for any remaining Vue reactivity
+    page.wait_for_timeout(1000)
 
     return page.content()
 
