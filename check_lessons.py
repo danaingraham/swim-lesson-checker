@@ -79,17 +79,63 @@ def fetch_availability_from_api(page):
 
     # Extract all time slots from events data
     all_slots = []
-    events = events_data if isinstance(events_data, list) else events_data.get("data", events_data.get("events", []))
 
-    # Debug: show structure
+    # Debug: show top-level structure
     if isinstance(events_data, dict):
         print(f"  Events response keys: {list(events_data.keys())}")
+        # The API wraps data in a 'result' key
+        inner = events_data.get("result", events_data)
+        if isinstance(inner, dict):
+            print(f"  Events result keys: {list(inner.keys())}")
+            # Try to find the actual list of events inside result
+            events = inner.get("data", inner.get("events", inner.get("time_blocks", inner.get("areas", []))))
+            if not isinstance(events, list) or len(events) == 0:
+                # Maybe result itself contains the list under another key
+                # Dump all keys and their types/lengths for debugging
+                for k, v in inner.items():
+                    vtype = type(v).__name__
+                    vlen = len(v) if isinstance(v, (list, dict, str)) else "N/A"
+                    print(f"    result.{k}: type={vtype}, len={vlen}")
+                    if isinstance(v, list) and v:
+                        print(f"      first item type: {type(v[0]).__name__}")
+                        if isinstance(v[0], dict):
+                            print(f"      first item keys: {list(v[0].keys())[:15]}")
+        elif isinstance(inner, list):
+            events = inner
+        else:
+            events = []
+    elif isinstance(events_data, list):
+        events = events_data
+    else:
+        events = []
+
     print(f"  Events count: {len(events) if isinstance(events, list) else 'not a list'}")
 
     # Extract booked slot IDs from bookings data
-    bookings = bookings_data if isinstance(bookings_data, list) else bookings_data.get("data", bookings_data.get("bookings", []))
     if isinstance(bookings_data, dict):
         print(f"  Bookings response keys: {list(bookings_data.keys())}")
+        inner_b = bookings_data.get("result", bookings_data)
+        if isinstance(inner_b, dict):
+            print(f"  Bookings result keys: {list(inner_b.keys())}")
+            bookings = inner_b.get("data", inner_b.get("bookings", []))
+            if not isinstance(bookings, list) or len(bookings) == 0:
+                for k, v in inner_b.items():
+                    vtype = type(v).__name__
+                    vlen = len(v) if isinstance(v, (list, dict, str)) else "N/A"
+                    print(f"    result.{k}: type={vtype}, len={vlen}")
+                    if isinstance(v, list) and v:
+                        print(f"      first item type: {type(v[0]).__name__}")
+                        if isinstance(v[0], dict):
+                            print(f"      first item keys: {list(v[0].keys())[:15]}")
+        elif isinstance(inner_b, list):
+            bookings = inner_b
+        else:
+            bookings = []
+    elif isinstance(bookings_data, list):
+        bookings = bookings_data
+    else:
+        bookings = []
+
     print(f"  Bookings count: {len(bookings) if isinstance(bookings, list) else 'not a list'}")
 
     # Build set of booked event IDs/times
