@@ -19,6 +19,7 @@ from bs4 import BeautifulSoup
 BOOKING_URL = "https://moragavalleyswimtennisclub.theclubspot.com/reserve/LtrQVDM3b8"
 TEACHER_NAME = "Sadie"
 NOTIFIED_FLAG = ".notified"
+TIME_PATTERN = re.compile(r"^\d{1,2}:\d{2}\s*(?:AM|PM)$")
 
 
 def fetch_page():
@@ -44,7 +45,15 @@ def fetch_page():
 def parse_availability(html):
     """
     Parse the page for Sadie's available time slots.
-    Returns a list of dicts with 'time' and 'date' for each available slot.
+
+    The page text has this pattern for each time row:
+      - Available:   "2:40 PM" -> "2:40 PM" -> "Sadie"
+        (time appears twice: once as row label, once as clickable button)
+      - Unavailable:  "4:00 PM" -> "not available SG" -> "Sadie"
+      - Booked:       "2:00 PM" -> "Kristen Sgarlata" -> "Sadie"
+
+    So an available Sadie slot = the line immediately before "Sadie"
+    matches a time pattern (the duplicate time from the button).
     """
     soup = BeautifulSoup(html, "html.parser")
     page_text = soup.get_text(separator="\n")
@@ -52,52 +61,34 @@ def parse_availability(html):
     date_match = re.search(r"DATE\s*\n\s*(\w+ \d+)", page_text)
     current_date = date_match.group(1).strip() if date_match else "Unknown date"
 
-    available_slots = []
-
     lines = page_text.split("\n")
     lines = [line.strip() for line in lines if line.strip()]
 
-    current_time = None
+    available_slots = []
+    seen_filter_tab = False
+
     for i, line in enumerate(lines):
-        time_match = re.match(r"^(\d{1,2}:\d{2}\s*(?:AM|PM))$", line)
-        if time_match:
-            current_time = time_match.group(1)
-            continue
+        # Skip the "Sadie" that appears in the filter tab area
+        if line == TEACHER_NAME and not seen_filter_tab:
+            # Check if this is in the filter area (near "All options")
+            context = " ".join(lines[max(0, i - 3):i])
+            if "All options" in context or "Booking rules" in context:
+                seen_filter_tab = True
+                continue
 
-        if TEACHER_NAME.lower() in line.lower() and current_time:
-            preceding = lines[max(0, i - 2) : i]
-            preceding_text = " ".join(preceding).lower()
+        if line == TEACHER_NAME and i > 0:
+            prev_line = lines[i - 1]
 
-            if "not available" not in preceding_text:
+            # AVAILABLE: the line before "Sadie" is a time like "2:40 PM"
+            # This is the clickable button text (time appears as button label)
+            if TIME_PATTERN.match(prev_line):
+                slot_time = prev_line
+                # Make sure this isn't the row label time by checking
+                # if there's another time 2 lines back (the row label)
                 available_slots.append({
-                    "time": current_time,
+                    "time": slot_time,
                     "date": current_date,
                 })
-
-    for tag in soup.find_all(string=re.compile(r"Sadie", re.I)):
-        parent = tag.find_parent()
-        if parent:
-            sibling_text = parent.get_text().lower()
-            if any(word in sibling_text for word in ["book", "reserve", "available", "open"]):
-                time_el = parent.find_previous(string=re.compile(r"\d{1,2}:\d{2}\s*(?:AM|PM)"))
-                slot_time = time_el.strip() if time_el else "Unknown time"
-                if not any(s["time"] == slot_time for s in available_slots):
-                    available_slots.append({
-                        "time": slot_time,
-                        "date": current_date,
-                    })
-
-    total_sadie_mentions = len(re.findall(r"Sadie", page_text, re.I))
-    not_available_sadie = len(re.findall(r"Not available.*?Sadie", page_text, re.I))
-
-    filter_mentions = 3
-    data_sadie_mentions = max(0, total_sadie_mentions - filter_mentions)
-
-    if data_sadie_mentions > not_available_sadie and not available_slots:
-        available_slots.append({
-            "time": "Check the page for exact times",
-            "date": current_date,
-        })
 
     return available_slots, current_date
 
