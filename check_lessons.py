@@ -235,7 +235,7 @@ def send_email(slots):
     msg["From"] = sender
     msg["To"] = recipient
     msg["Subject"] = "Swim Lessons Open -- Sadie has availability!"
-    msg.attach(MIMEText(body, "plain"))
+    msg.attach(MIMEText(body, "plain", "utf-8"))
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(sender, password)
