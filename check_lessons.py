@@ -1,8 +1,8 @@
 """
 Swim Lesson Availability Checker
+
 Checks the Moraga Valley Swim & Tennis Club booking page for
 available lessons with teacher Sadie and sends an email notification.
-
 Uses Playwright to load the booking page and intercepts the Parse Server
 API responses to determine availability (works without login).
 Falls back to DOM text analysis if API interception finds nothing.
@@ -15,15 +15,12 @@ import sys
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
-
 
 BOOKING_URL = "https://moragavalleyswimtennisclub.theclubspot.com/reserve/LtrQVDM3b8"
 TEACHER_NAME = "Sadie"
 TIME_PATTERN = re.compile(r"^\d{1,2}:\d{2}\s*(AM|PM)$", re.IGNORECASE)
-
 
 def check_availability_via_api(page):
     """
@@ -42,22 +39,20 @@ def check_availability_via_api(page):
                 data = response.json()
                 if "result" in data:
                     time_blocks.extend(data["result"])
-                    print(f"  [API] Captured {len(data['result'])} time blocks.")
+                    print(f" [API] Captured {len(data['result'])} time blocks.")
             elif "retrieve_bookings_for_calendar" in url:
                 data = response.json()
                 if "result" in data:
                     bookings.extend(data["result"])
-                    print(f"  [API] Captured {len(data['result'])} bookings.")
+                    print(f" [API] Captured {len(data['result'])} bookings.")
         except Exception as e:
-            print(f"  [API] Warning: {e}")
+            print(f" [API] Warning: {e}")
 
     page.on("response", handle_response)
-    print(f"  Loading {BOOKING_URL} ...")
+    print(f" Loading {BOOKING_URL} ...")
     page.goto(BOOKING_URL, wait_until="networkidle", timeout=60000)
     page.wait_for_timeout(8000)
-
     return time_blocks, bookings
-
 
 def _extract_id(val):
     """Extract an objectId from a value that could be a dict, pointer, or string."""
@@ -67,37 +62,37 @@ def _extract_id(val):
         return val
     return ""
 
-
 def find_available_from_api(time_blocks, bookings):
     """Compare time blocks vs bookings to find Sadie's open slots."""
     # Debug: log first booking structure
     if bookings:
-        print(f"  [API] Sample booking keys: {list(bookings[0].keys()) if isinstance(bookings[0], dict) else type(bookings[0])}")
+        print(f" [API] Sample booking keys: {list(bookings[0].keys()) if isinstance(bookings[0], dict) else type(bookings[0])}")
         if isinstance(bookings[0], dict):
             sample = {k: type(v).__name__ for k, v in bookings[0].items()}
-            print(f"  [API] Sample booking types: {sample}")
+            print(f" [API] Sample booking types: {sample}")
 
     # Debug: log first time block structure
     if time_blocks:
-        print(f"  [API] Sample block keys: {list(time_blocks[0].keys()) if isinstance(time_blocks[0], dict) else type(time_blocks[0])}")
+        print(f" [API] Sample block keys: {list(time_blocks[0].keys()) if isinstance(time_blocks[0], dict) else type(time_blocks[0])}")
 
     # Build a set of booked (event_id, area_id) pairs
     booked_keys = set()
     for b in bookings:
         if isinstance(b, str):
-            continue  # skip if booking is just a string ID
+            continue # skip if booking is just a string ID
         ev_id = _extract_id(b.get("event", ""))
         ar_id = _extract_id(b.get("area", ""))
         if ev_id and ar_id:
             booked_keys.add((ev_id, ar_id))
-    print(f"  [API] {len(booked_keys)} booked (event, area) pairs.")
+
+    print(f" [API] {len(booked_keys)} booked (event, area) pairs.")
 
     # Find Sadie's time block/area combos
     available = []
     sadie_total = 0
     for block in time_blocks:
         if isinstance(block, str):
-            continue  # skip if block is just a string ID
+            continue # skip if block is just a string ID
         block_id = block.get("objectId", "")
         areas = block.get("areas", [])
         start_time = block.get("startTime", 0)
@@ -115,6 +110,7 @@ def find_available_from_api(time_blocks, bookings):
             area_name = area.get("name", "")
             if TEACHER_NAME.lower() not in area_name.lower():
                 continue
+
             sadie_total += 1
             area_id = area.get("objectId", "")
             key = (block_id, area_id)
@@ -124,9 +120,8 @@ def find_available_from_api(time_blocks, bookings):
                     "time": start_time,
                 })
 
-    print(f"  [API] {TEACHER_NAME}: {sadie_total} total, {len(available)} available.")
+    print(f" [API] {TEACHER_NAME}: {sadie_total} total, {len(available)} available.")
     return available
-
 
 def check_availability_via_dom(page):
     """
@@ -137,13 +132,13 @@ def check_availability_via_dom(page):
     try:
         page.wait_for_selector(".availabilityButtonV2", timeout=10000)
     except Exception:
-        print("  [DOM] No availability buttons found.")
+        print(" [DOM] No availability buttons found.")
         return []
 
     html = page.content()
     soup = BeautifulSoup(html, "html.parser")
     buttons = soup.find_all("div", class_="availabilityButtonV2")
-    print(f"  [DOM] Found {len(buttons)} total availability buttons.")
+    print(f" [DOM] Found {len(buttons)} total availability buttons.")
 
     available = []
     sadie_total = 0
@@ -169,7 +164,7 @@ def check_availability_via_dom(page):
         button_text = ""
         for child in p_tag.children:
             if hasattr(child, 'name') and child.name == 'span':
-                break  # stop before area-name
+                break # stop before area-name
             if hasattr(child, 'name') and child.name == 'br':
                 continue
             text = child.get_text().strip() if hasattr(child, 'get_text') else str(child).strip()
@@ -188,11 +183,10 @@ def check_availability_via_dom(page):
 
         # Log first few for debugging
         if sadie_total <= 4:
-            print(f"    [DOM] Sadie slot: text='{button_text}', booked_class={has_booked_class}, is_time={is_time}")
+            print(f" [DOM] Sadie slot: text='{button_text}', booked_class={has_booked_class}, is_time={is_time}")
 
-    print(f"  [DOM] {TEACHER_NAME}: {sadie_total} total, {sadie_booked_class} with booked class, {sadie_text_avail} with time text (available).")
+    print(f" [DOM] {TEACHER_NAME}: {sadie_total} total, {sadie_booked_class} with booked class, {sadie_text_avail} with time text (available).")
     return available
-
 
 def format_time(military):
     """Convert 1400 to '2:00 PM'."""
@@ -206,8 +200,7 @@ def format_time(military):
             display = 12
         return f"{display}:{mins:02d} {ampm}"
     except (ValueError, TypeError):
-        return str(military)
-
+        return str(military).replace('\xa0', ' ')
 
 def send_email(slots):
     """Send an email notification about available slots."""
@@ -220,9 +213,10 @@ def send_email(slots):
         sys.exit(1)
 
     slot_list = "\n".join(
-        f"  - {s.get('date', '?')} at {format_time(s['time'])}"
+        f" - {s.get('date', '?')} at {format_time(s['time'])}"
         for s in slots
     )
+
     body = (
         f"Hi Dana!\n\n"
         f"Sadie has swim lesson slots available! Here's what I found:\n\n"
@@ -230,6 +224,8 @@ def send_email(slots):
         f"Book now before they fill up:\n{BOOKING_URL}\n\n"
         f"-- Swim Lesson Checker Bot\n"
     )
+    # Scrub any non-breaking spaces that snuck through from HTML
+    body = body.replace('\xa0', ' ')
 
     msg = MIMEMultipart()
     msg["From"] = sender
@@ -239,10 +235,9 @@ def send_email(slots):
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(sender, password)
-        server.sendmail(sender, recipient, msg.as_string())
+        server.send_message(msg)
 
     print(f"Email sent to {recipient}!")
-
 
 def main():
     already = os.environ.get("ALREADY_NOTIFIED", "").lower() == "true"
@@ -263,29 +258,30 @@ def main():
             # Method 1: Try API interception
             api_slots = []
             if time_blocks:
-                print(f"\n  Using API method ({len(time_blocks)} blocks, {len(bookings)} bookings).")
+                print(f"\n Using API method ({len(time_blocks)} blocks, {len(bookings)} bookings).")
                 try:
                     api_slots = find_available_from_api(time_blocks, bookings)
                 except Exception as e:
-                    print(f"  [API] Error parsing API data: {e}")
+                    print(f" [API] Error parsing API data: {e}")
             else:
-                print(f"\n  API interception captured nothing.")
+                print(f"\n API interception captured nothing.")
 
             # Method 2: DOM text analysis (always run)
-            print(f"\n  Running DOM text analysis...")
+            print(f"\n Running DOM text analysis...")
             dom_slots = check_availability_via_dom(page)
 
             # Use whichever found more results
             if api_slots and len(api_slots) >= len(dom_slots):
-                print(f"  Using API results ({len(api_slots)} slots).")
+                print(f" Using API results ({len(api_slots)} slots).")
                 slots = api_slots
             elif dom_slots:
-                print(f"  Using DOM results ({len(dom_slots)} slots).")
+                print(f" Using DOM results ({len(dom_slots)} slots).")
                 slots = dom_slots
             else:
-                slots = api_slots  # might be empty
+                slots = api_slots # might be empty
 
             browser.close()
+
     except Exception as e:
         print(f"Error: {e}")
         import traceback
@@ -296,7 +292,7 @@ def main():
     if slots:
         print(f"\nFOUND {len(slots)} available slot(s) with {TEACHER_NAME}!")
         for s in slots:
-            print(f"  - {s.get('date', '?')} at {format_time(s['time'])}")
+            print(f" - {s.get('date', '?')} at {format_time(s['time'])}")
         try:
             send_email(slots)
             with open(".notified", "w") as f:
@@ -306,7 +302,6 @@ def main():
             sys.exit(1)
     else:
         print(f"\nNo available slots with {TEACHER_NAME}.")
-
 
 if __name__ == "__main__":
     main()
