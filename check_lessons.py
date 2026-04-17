@@ -174,7 +174,7 @@ def check_availability_via_dom(page):
                 continue
             text = child.get_text().strip() if hasattr(child, 'get_text') else str(child).strip()
             if text:
-                button_text = text
+                button_text = text.replace('\xa0', ' ')
 
         # Check if it's a time (available) or a name (booked)
         is_time = bool(TIME_PATTERN.match(button_text))
