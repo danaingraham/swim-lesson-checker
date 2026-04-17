@@ -202,18 +202,31 @@ def format_time(military):
     except (ValueError, TypeError):
         return str(military).replace('\xa0', ' ')
 
+def _ascii_clean(s):
+    """Replace any non-ASCII characters with a regular space."""
+    if not isinstance(s, str):
+        s = str(s)
+    # First normalize common nbsp variants to regular space, then drop anything else non-ASCII
+    cleaned = s.replace('\xa0', ' ').replace('\u2007', ' ').replace('\u202f', ' ')
+    return cleaned.encode('ascii', errors='replace').decode('ascii')
+
 def send_email(slots):
     """Send an email notification about available slots."""
-    sender = os.environ.get("GMAIL_ADDRESS")
-    password = os.environ.get("GMAIL_APP_PASSWORD")
-    recipient = os.environ.get("NOTIFY_EMAIL", sender)
+    sender = os.environ.get("GMAIL_ADDRESS", "").strip()
+    password = os.environ.get("GMAIL_APP_PASSWORD", "").strip()
+    recipient = os.environ.get("NOTIFY_EMAIL", sender).strip()
 
     if not sender or not password:
         print("ERROR: GMAIL_ADDRESS and GMAIL_APP_PASSWORD must be set.")
         sys.exit(1)
 
+    # Scrub any non-ASCII from everything -- defense in depth.
+    sender = _ascii_clean(sender)
+    recipient = _ascii_clean(recipient)
+    password = _ascii_clean(password)
+
     slot_list = "\n".join(
-        f" - {s.get('date', '?')} at {format_time(s['time'])}"
+        f" - {_ascii_clean(s.get('date', '?'))} at {_ascii_clean(format_time(s['time']))}"
         for s in slots
     )
 
@@ -224,14 +237,19 @@ def send_email(slots):
         f"Book now before they fill up:\n{BOOKING_URL}\n\n"
         f"-- Swim Lesson Checker Bot\n"
     )
-    # Scrub any non-breaking spaces that snuck through from HTML
-    body = body.replace('\xa0', ' ')
+    body = _ascii_clean(body)
 
-    msg = MIMEMultipart()
+    # Diagnostic: log any unexpected non-ASCII in key fields (should be empty after scrub)
+    for label, val in [("sender", sender), ("recipient", recipient), ("body", body)]:
+        non_ascii = [(i, c, ord(c)) for i, c in enumerate(val) if ord(c) > 127]
+        if non_ascii:
+            print(f"  [EMAIL] {label} still has non-ASCII after scrub: {non_ascii[:5]}")
+
+    # Simpler single-part message (no multipart).
+    msg = MIMEText(body, "plain", "utf-8")
     msg["From"] = sender
     msg["To"] = recipient
     msg["Subject"] = "Swim Lessons Open -- Sadie has availability!"
-    msg.attach(MIMEText(body, "plain", "utf-8"))
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(sender, password)
