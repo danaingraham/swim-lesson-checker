@@ -1,217 +1,126 @@
-"""
-Swim Lesson Availability Checker
-
-Checks the Moraga Valley Swim & Tennis Club booking page for
-available lessons with teacher Sadie and sends an email notification.
-Uses Playwright to load the booking page and intercepts the Parse Server
-API responses to determine availability (works without login).
-Falls back to DOM text analysis if API interception finds nothing.
-"""
-
 import os
 import re
-import json
 import sys
 import smtplib
+from datetime import datetime, timedelta
 from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from playwright.sync_api import sync_playwright
-from bs4 import BeautifulSoup
 
 BOOKING_URL = "https://moragavalleyswimtennisclub.theclubspot.com/reserve/LtrQVDM3b8"
-TEACHER_NAME = "Sadie"
-TIME_PATTERN = re.compile(r"^\d{1,2}:\d{2}\s*(AM|PM)$", re.IGNORECASE)
+TIME_PATTERN = re.compile(r"\d{1,2}:\d{2}\s*(AM|PM)", re.IGNORECASE)
+DAYS_TO_CHECK = 8
 
-def check_availability_via_api(page):
-    """
-    Intercept Parse Server API responses at the network level.
-    Returns (time_blocks_list, bookings_list) or ([], []) if not captured.
-    """
-    time_blocks = []
-    bookings = []
 
-    def handle_response(response):
-        url = response.url
-        if response.status != 200:
-            return
-        try:
-            if "retrieve_events_for_time_blocks_calendar" in url:
-                data = response.json()
-                if "result" in data:
-                    time_blocks.extend(data["result"])
-                    print(f" [API] Captured {len(data['result'])} time blocks.")
-            elif "retrieve_bookings_for_calendar" in url:
-                data = response.json()
-                if "result" in data:
-                    bookings.extend(data["result"])
-                    print(f" [API] Captured {len(data['result'])} bookings.")
-        except Exception as e:
-            print(f" [API] Warning: {e}")
+def get_unlocked_days(page):
+    """Open calendar, wait for lock states to settle, return unlocked day data-time values."""
+    page.click("#reserve-date-picker")
+    # Wait for the litepicker to apply is-locked classes (happens asynchronously)
+    page.wait_for_timeout(3000)
 
-    page.on("response", handle_response)
-    print(f" Loading {BOOKING_URL} ...")
-    page.goto(BOOKING_URL, wait_until="networkidle", timeout=60000)
-    page.wait_for_timeout(8000)
-    return time_blocks, bookings
+    today = datetime.utcnow().date()
+    unlocked = []
 
-def _extract_id(val):
-    """Extract an objectId from a value that could be a dict, pointer, or string."""
-    if isinstance(val, dict):
-        return val.get("objectId", "")
-    elif isinstance(val, str):
-        return val
-    return ""
+    days = page.locator(".day-item:not(.is-previous-month):not(.is-next-month)")
+    for i in range(days.count()):
+        day_el = days.nth(i)
+        day_num = day_el.text_content().strip()
+        classes = day_el.get_attribute("class") or ""
+        data_time = day_el.get_attribute("data-time") or ""
 
-def find_available_from_api(time_blocks, bookings):
-    """Compare time blocks vs bookings to find Sadie's open slots."""
-    # Debug: log first booking structure
-    if bookings:
-        print(f" [API] Sample booking keys: {list(bookings[0].keys()) if isinstance(bookings[0], dict) else type(bookings[0])}")
-        if isinstance(bookings[0], dict):
-            sample = {k: type(v).__name__ for k, v in bookings[0].items()}
-            print(f" [API] Sample booking types: {sample}")
+        if "is-locked" in classes:
+            continue
 
-    # Debug: log first time block structure
-    if time_blocks:
-        print(f" [API] Sample block keys: {list(time_blocks[0].keys()) if isinstance(time_blocks[0], dict) else type(time_blocks[0])}")
+        # Determine the actual date from data-time (ms timestamp)
+        if data_time:
+            from datetime import timezone
+            ts = int(data_time) / 1000
+            day_date = datetime.fromtimestamp(ts, tz=timezone.utc).date()
+            offset = (day_date - today).days
+            if 1 <= offset <= DAYS_TO_CHECK and day_date.weekday() < 5:
+                unlocked.append(data_time)
+                print(f"  Day {day_num} ({day_date}) is unlocked")
 
-    # Build a set of booked (event_id, area_id) pairs
-    booked_keys = set()
-    for b in bookings:
-        if isinstance(b, str):
-            continue # skip if booking is just a string ID
-        ev_id = _extract_id(b.get("event", ""))
-        ar_id = _extract_id(b.get("area", ""))
-        if ev_id and ar_id:
-            booked_keys.add((ev_id, ar_id))
+    # Close the calendar
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(300)
+    return unlocked
 
-    print(f" [API] {len(booked_keys)} booked (event, area) pairs.")
 
-    # Find Sadie's time block/area combos
-    available = []
-    sadie_total = 0
-    for block in time_blocks:
-        if isinstance(block, str):
-            continue # skip if block is just a string ID
-        block_id = block.get("objectId", "")
-        areas = block.get("areas", [])
-        start_time = block.get("startTime", 0)
+def check_date_by_timestamp(page, data_time):
+    """Click a specific day in the litepicker by its data-time attribute."""
+    page.click("#reserve-date-picker")
+    page.wait_for_timeout(1000)
 
-        # Get date - could be a Parse Date object or string
-        date_obj = block.get("date", {})
-        if isinstance(date_obj, dict):
-            date_str = date_obj.get("iso", "")
-        else:
-            date_str = str(date_obj)
-
-        for area in areas:
-            if isinstance(area, str):
-                continue
-            area_name = area.get("name", "")
-            if TEACHER_NAME.lower() not in area_name.lower():
-                continue
-
-            sadie_total += 1
-            area_id = area.get("objectId", "")
-            key = (block_id, area_id)
-            if key not in booked_keys:
-                available.append({
-                    "date": date_str[:10] if date_str else "unknown",
-                    "time": start_time,
-                })
-
-    print(f" [API] {TEACHER_NAME}: {sadie_total} total, {len(available)} available.")
-    return available
-
-def check_availability_via_dom(page):
-    """
-    Fallback: parse the rendered DOM.
-    Available slots show a time (e.g. "2:40 PM") in the button text,
-    while booked slots show a person's name or "not available".
-    """
-    try:
-        page.wait_for_selector(".availabilityButtonV2", timeout=10000)
-    except Exception:
-        print(" [DOM] No availability buttons found.")
+    day_el = page.locator(f'.day-item[data-time="{data_time}"]')
+    if day_el.count() == 0:
+        print(f"  Day element not found for {data_time}")
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
         return []
 
-    html = page.content()
-    soup = BeautifulSoup(html, "html.parser")
-    buttons = soup.find_all("div", class_="availabilityButtonV2")
-    print(f" [DOM] Found {len(buttons)} total availability buttons.")
+    day_el.click(force=True)
+    page.wait_for_timeout(4000)
 
-    available = []
-    sadie_total = 0
-    sadie_booked_class = 0
-    sadie_text_avail = 0
+    date_label = page.input_value("#reserve-date-picker")
+    print(f"Checking {date_label}...")
 
-    for btn in buttons:
-        area_span = btn.find("span", class_="area-name")
-        if not area_span or TEACHER_NAME.lower() not in area_span.get_text().lower():
+    # Check for available slots
+    slots = []
+    seen = set()
+    buttons = page.locator(".availabilityButtonV2")
+    count = buttons.count()
+
+    for i in range(count):
+        btn = buttons.nth(i)
+        text = (btn.text_content() or "").strip()
+        classes = btn.get_attribute("class") or ""
+        if "booked" in classes:
+            continue
+        match = TIME_PATTERN.search(text)
+        if not match:
             continue
 
-        sadie_total += 1
-        has_booked_class = "booked" in btn.get("class", [])
-        if has_booked_class:
-            sadie_booked_class += 1
-
-        # Get the text BEFORE the area-name span (the first text node)
-        p_tag = btn.find("p")
-        if not p_tag:
+        time_str = match.group(0)
+        teacher = text.replace(time_str, "").strip()
+        key = (time_str, teacher)
+        if key in seen:
             continue
+        seen.add(key)
 
-        # Extract text content excluding the area-name span
-        button_text = ""
-        for child in p_tag.children:
-            if hasattr(child, 'name') and child.name == 'span':
-                break # stop before area-name
-            if hasattr(child, 'name') and child.name == 'br':
-                continue
-            text = child.get_text().strip() if hasattr(child, 'get_text') else str(child).strip()
-            if text:
-                button_text = text.replace('\xa0', ' ')
+        slots.append({
+            "date": date_label,
+            "time": time_str,
+            "teacher": teacher,
+        })
 
-        # Check if it's a time (available) or a name (booked)
-        is_time = bool(TIME_PATTERN.match(button_text))
-        if is_time:
-            sadie_text_avail += 1
-            start_attr = btn.get("start-time", "")
-            available.append({
-                "date": "see-page",
-                "time": start_attr,
-            })
+    if slots:
+        print(f"  FOUND {len(slots)} available slot(s)!")
+    else:
+        print(f"  No available slots.")
+    return slots
 
-        # Log first few for debugging
-        if sadie_total <= 4:
-            print(f" [DOM] Sadie slot: text='{button_text}', booked_class={has_booked_class}, is_time={is_time}")
 
-    print(f" [DOM] {TEACHER_NAME}: {sadie_total} total, {sadie_booked_class} with booked class, {sadie_text_avail} with time text (available).")
-    return available
+def find_available_slots(page):
+    page.goto(BOOKING_URL, wait_until="networkidle", timeout=60000)
+    page.wait_for_timeout(5000)
 
-def format_time(military):
-    """Convert 1400 to '2:00 PM'."""
-    try:
-        t = int(military)
-        hours = t // 100
-        mins = t % 100
-        ampm = "AM" if hours < 12 else "PM"
-        display = hours if hours <= 12 else hours - 12
-        if display == 0:
-            display = 12
-        return f"{display}:{mins:02d} {ampm}"
-    except (ValueError, TypeError):
-        return str(military).replace('\xa0', ' ')
+    print("Scanning calendar for unlocked days...")
+    unlocked = get_unlocked_days(page)
 
-def _ascii_clean(s):
-    """Replace any non-ASCII characters with a regular space."""
-    if not isinstance(s, str):
-        s = str(s)
-    # First normalize common nbsp variants to regular space, then drop anything else non-ASCII
-    cleaned = s.replace('\xa0', ' ').replace('\u2007', ' ').replace('\u202f', ' ')
-    return cleaned.encode('ascii', errors='replace').decode('ascii')
+    if not unlocked:
+        print("No unlocked days found in the next week.")
+        return []
+
+    print(f"Found {len(unlocked)} unlocked day(s), checking each...\n")
+
+    all_slots = []
+    for data_time in unlocked:
+        all_slots.extend(check_date_by_timestamp(page, data_time))
+
+    return all_slots
+
 
 def send_email(slots):
-    """Send an email notification about available slots."""
     sender = os.environ.get("GMAIL_ADDRESS", "").strip()
     password = os.environ.get("GMAIL_APP_PASSWORD", "").strip()
     recipient = os.environ.get("NOTIFY_EMAIL", sender).strip()
@@ -220,42 +129,34 @@ def send_email(slots):
         print("ERROR: GMAIL_ADDRESS and GMAIL_APP_PASSWORD must be set.")
         sys.exit(1)
 
-    # Scrub any non-ASCII from everything -- defense in depth.
-    sender = _ascii_clean(sender)
-    recipient = _ascii_clean(recipient)
-    password = _ascii_clean(password)
-
-    slot_list = "\n".join(
-        f" - {_ascii_clean(s.get('date', '?'))} at {_ascii_clean(format_time(s['time']))}"
-        for s in slots
-    )
+    slot_lines = []
+    current_date = ""
+    for s in slots:
+        if s["date"] != current_date:
+            current_date = s["date"]
+            slot_lines.append(f"\n{current_date}:")
+        teacher = f" ({s['teacher']})" if s["teacher"] else ""
+        slot_lines.append(f"  - {s['time']}{teacher}")
 
     body = (
         f"Hi Dana!\n\n"
-        f"Sadie has swim lesson slots available! Here's what I found:\n\n"
-        f"{slot_list}\n\n"
-        f"Book now before they fill up:\n{BOOKING_URL}\n\n"
+        f"Swim lessons just opened up! Here's what's available:\n"
+        f"{''.join(slot_lines)}\n\n"
+        f"Book now: {BOOKING_URL}\n\n"
         f"-- Swim Lesson Checker Bot\n"
     )
-    body = _ascii_clean(body)
 
-    # Diagnostic: log any unexpected non-ASCII in key fields (should be empty after scrub)
-    for label, val in [("sender", sender), ("recipient", recipient), ("body", body)]:
-        non_ascii = [(i, c, ord(c)) for i, c in enumerate(val) if ord(c) > 127]
-        if non_ascii:
-            print(f"  [EMAIL] {label} still has non-ASCII after scrub: {non_ascii[:5]}")
-
-    # Simpler single-part message (no multipart).
     msg = MIMEText(body, "plain", "utf-8")
     msg["From"] = sender
     msg["To"] = recipient
-    msg["Subject"] = "Swim Lessons Open -- Sadie has availability!"
+    msg["Subject"] = "Swim Lessons Are Open!"
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(sender, password)
         server.send_message(msg)
 
     print(f"Email sent to {recipient}!")
+
 
 def main():
     already = os.environ.get("ALREADY_NOTIFIED", "").lower() == "true"
@@ -269,37 +170,8 @@ def main():
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
-
-            # Method 1: Intercept API responses
-            time_blocks, bookings = check_availability_via_api(page)
-
-            # Method 1: Try API interception
-            api_slots = []
-            if time_blocks:
-                print(f"\n Using API method ({len(time_blocks)} blocks, {len(bookings)} bookings).")
-                try:
-                    api_slots = find_available_from_api(time_blocks, bookings)
-                except Exception as e:
-                    print(f" [API] Error parsing API data: {e}")
-            else:
-                print(f"\n API interception captured nothing.")
-
-            # Method 2: DOM text analysis (always run)
-            print(f"\n Running DOM text analysis...")
-            dom_slots = check_availability_via_dom(page)
-
-            # Use whichever found more results
-            if api_slots and len(api_slots) >= len(dom_slots):
-                print(f" Using API results ({len(api_slots)} slots).")
-                slots = api_slots
-            elif dom_slots:
-                print(f" Using DOM results ({len(dom_slots)} slots).")
-                slots = dom_slots
-            else:
-                slots = api_slots # might be empty
-
+            slots = find_available_slots(page)
             browser.close()
-
     except Exception as e:
         print(f"Error: {e}")
         import traceback
@@ -308,9 +180,10 @@ def main():
         sys.exit(0)
 
     if slots:
-        print(f"\nFOUND {len(slots)} available slot(s) with {TEACHER_NAME}!")
+        print(f"\nFOUND {len(slots)} available slot(s)!")
         for s in slots:
-            print(f" - {s.get('date', '?')} at {format_time(s['time'])}")
+            teacher = f" ({s['teacher']})" if s["teacher"] else ""
+            print(f"  - {s['date']} at {s['time']}{teacher}")
         try:
             send_email(slots)
             with open(".notified", "w") as f:
@@ -319,7 +192,8 @@ def main():
             print(f"Error sending email: {e}")
             sys.exit(1)
     else:
-        print(f"\nNo available slots with {TEACHER_NAME}.")
+        print("\nNo available slots found.")
+
 
 if __name__ == "__main__":
     main()
