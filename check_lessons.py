@@ -120,10 +120,15 @@ def find_available_slots(page):
     return all_slots
 
 
+def _clean(s):
+    """Replace non-ASCII characters (e.g. nbsp) with a regular space."""
+    return s.replace('\xa0', ' ').encode('ascii', errors='replace').decode('ascii')
+
+
 def send_email(slots):
-    sender = os.environ.get("GMAIL_ADDRESS", "").strip()
-    password = os.environ.get("GMAIL_APP_PASSWORD", "").strip()
-    recipient = os.environ.get("NOTIFY_EMAIL", sender).strip()
+    sender = _clean(os.environ.get("GMAIL_ADDRESS", "").strip())
+    password = _clean(os.environ.get("GMAIL_APP_PASSWORD", "").strip())
+    recipient = _clean(os.environ.get("NOTIFY_EMAIL", sender).strip())
 
     if not sender or not password:
         print("ERROR: GMAIL_ADDRESS and GMAIL_APP_PASSWORD must be set.")
@@ -138,7 +143,7 @@ def send_email(slots):
         teacher = f" ({s['teacher']})" if s["teacher"] else ""
         slot_lines.append(f"  - {s['time']}{teacher}")
 
-    body = (
+    body = _clean(
         f"Hi Dana!\n\n"
         f"Swim lessons just opened up! Here's what's available:\n"
         f"{''.join(slot_lines)}\n\n"
