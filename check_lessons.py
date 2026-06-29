@@ -11,36 +11,58 @@ TIME_PATTERN = re.compile(r"\d{1,2}:\d{2}\s*(AM|PM)", re.IGNORECASE)
 DAYS_TO_CHECK = 8
 
 
-def get_unlocked_days(page):
-    """Open calendar, wait for lock states to settle, return unlocked day data-time values."""
-    page.click("#reserve-date-picker")
-    # Wait for the litepicker to apply is-locked classes (happens asynchronously)
-    page.wait_for_timeout(3000)
-
-    today = datetime.utcnow().date()
+def _scan_calendar_view(page, today):
+    """Scan all visible day-items in the current calendar view for unlocked weekdays."""
+    from datetime import timezone
     unlocked = []
-
-    days = page.locator(".day-item:not(.is-previous-month):not(.is-next-month)")
+    seen = set()
+    days = page.locator(".day-item")
     for i in range(days.count()):
         day_el = days.nth(i)
-        day_num = day_el.text_content().strip()
         classes = day_el.get_attribute("class") or ""
         data_time = day_el.get_attribute("data-time") or ""
-
+        if not data_time or data_time in seen:
+            continue
+        seen.add(data_time)
         if "is-locked" in classes:
             continue
+        ts = int(data_time) / 1000
+        day_date = datetime.fromtimestamp(ts, tz=timezone.utc).date()
+        offset = (day_date - today).days
+        if 1 <= offset <= DAYS_TO_CHECK and day_date.weekday() < 5:
+            unlocked.append(data_time)
+            print(f"  Day {day_date.day} ({day_date}) is unlocked")
+    return unlocked
 
-        # Determine the actual date from data-time (ms timestamp)
-        if data_time:
-            from datetime import timezone
-            ts = int(data_time) / 1000
-            day_date = datetime.fromtimestamp(ts, tz=timezone.utc).date()
-            offset = (day_date - today).days
-            if 1 <= offset <= DAYS_TO_CHECK and day_date.weekday() < 5:
-                unlocked.append(data_time)
-                print(f"  Day {day_num} ({day_date}) is unlocked")
 
-    # Close the calendar
+def get_unlocked_days(page):
+    """Open calendar, scan current and next month views for unlocked days."""
+    from datetime import timezone
+    today = datetime.utcnow().date()
+    seen_times = set()
+    unlocked = []
+
+    page.click("#reserve-date-picker")
+    page.wait_for_timeout(3000)
+
+    print("  Scanning current month view...")
+    for item in _scan_calendar_view(page, today):
+        if item not in seen_times:
+            seen_times.add(item)
+            unlocked.append(item)
+
+    last_target = today + timedelta(days=DAYS_TO_CHECK)
+    if last_target.month != today.month or last_target.year != today.year:
+        print("  Navigating to next month...")
+        next_btn = page.locator(".button-next-month")
+        if next_btn.count() > 0:
+            next_btn.click()
+            page.wait_for_timeout(3000)
+            for item in _scan_calendar_view(page, today):
+                if item not in seen_times:
+                    seen_times.add(item)
+                    unlocked.append(item)
+
     page.keyboard.press("Escape")
     page.wait_for_timeout(300)
     return unlocked
