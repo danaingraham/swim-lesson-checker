@@ -68,34 +68,21 @@ def get_unlocked_days(page):
     return unlocked
 
 
-def _navigate_calendar_to_timestamp(page, data_time):
-    """Ensure the calendar is showing the month that contains data_time."""
-    from datetime import timezone
-    ts = int(data_time) / 1000
-    target_date = datetime.fromtimestamp(ts, tz=timezone.utc).date()
-
-    for _ in range(3):
-        month_label = page.locator(".month-item-name").first
-        if month_label.count() == 0:
-            break
-        label_text = (month_label.text_content() or "").strip()
-        target_month_name = target_date.strftime("%B %Y")
-        if target_month_name.lower() in label_text.lower():
-            break
-        next_btn = page.locator(".button-next-month")
-        if next_btn.count() > 0:
-            next_btn.click()
-            page.wait_for_timeout(1000)
-
-
 def check_date_by_timestamp(page, data_time):
     """Click a specific day in the litepicker by its data-time attribute."""
     page.click("#reserve-date-picker")
     page.wait_for_timeout(1000)
 
-    _navigate_calendar_to_timestamp(page, data_time)
-
     day_el = page.locator(f'.day-item[data-time="{data_time}"]')
+    for _ in range(3):
+        if day_el.count() > 0:
+            break
+        next_btn = page.locator(".button-next-month")
+        if next_btn.count() > 0:
+            next_btn.click()
+            page.wait_for_timeout(1500)
+        day_el = page.locator(f'.day-item[data-time="{data_time}"]')
+
     if day_el.count() == 0:
         print(f"  Day element not found for {data_time}")
         page.keyboard.press("Escape")
